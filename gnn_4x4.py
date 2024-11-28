@@ -5,47 +5,43 @@ import torch.nn.functional as F
 import torch_geometric
 from torch_geometric.data import Data
 import matplotlib.pyplot as plt
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.nn import GATConv, global_mean_pool
 import networkx as nx
+import seaborn as sns
 
 class GNN4x4(nn.Module):
     def __init__(self, input_dim=1, hidden_dim=32):
         super(GNN4x4, self).__init__()
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.fc = nn.Linear(hidden_dim, 2)  # Binary classification
+        self.conv1 = GATConv(input_dim, hidden_dim, heads=4, dropout=0.2)
+        self.conv2 = GATConv(hidden_dim * 4, hidden_dim, heads=1, dropout=0.2)
+        self.fc = nn.Linear(hidden_dim, 2)
 
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
 
-        # First Graph Convolution Layer
         x = self.conv1(x, edge_index)
-        x = F.relu(x)
-        x = F.dropout(x, training=self.training)
+        x = F.elu(x)
+        x = F.dropout(x, p=0.2, training=self.training)
 
-        # Second Graph Convolution Layer
         x = self.conv2(x, edge_index)
-        x = F.relu(x)
+        x = F.elu(x)
 
-        # Global pooling
+        self.attention_weights = self.conv1.att_weights
+
         x = global_mean_pool(x, data.batch)
 
-        # Classification layer
         x = self.fc(x)
         return F.log_softmax(x, dim=1)
 
 def matrix_to_graph(matrix):
-    """Convert a 4x4 matrix to a graph structure."""
     num_nodes = 16
-    x = matrix.reshape(-1, 1).astype(np.float32)  # Node features
+    x = matrix.reshape(-1, 1).astype(np.float32)
     
-    # Create edges between adjacent cells (including diagonals)
     edge_index = []
     for i in range(4):
         for j in range(4):
             current_node = i * 4 + j
             
-            # Define possible neighbors (including diagonals)
             neighbors = []
             for di in [-1, 0, 1]:
                 for dj in [-1, 0, 1]:
@@ -56,7 +52,6 @@ def matrix_to_graph(matrix):
                         neighbor_node = ni * 4 + nj
                         neighbors.append(neighbor_node)
             
-            # Add edges in both directions
             for neighbor in neighbors:
                 edge_index.append([current_node, neighbor])
                 edge_index.append([neighbor, current_node])
@@ -66,7 +61,6 @@ def matrix_to_graph(matrix):
     return torch.FloatTensor(x), torch.LongTensor(edge_index)
 
 def generate_data(num_samples):
-    """Generate random 4x4 matrices and labels."""
     matrices = []
     labels = []
     
@@ -78,44 +72,46 @@ def generate_data(num_samples):
     
     return matrices, labels
 
-def visualize_graph(matrix, edge_index):
-    """Visualize the graph structure of a 4x4 matrix."""
+def visualize_graph(matrix, edge_index, attention_weights=None):
     G = nx.Graph()
     
-    # Add nodes
     for i in range(16):
         row, col = i // 4, i % 4
-        G.add_node(i, pos=(col, -row), value=matrix.reshape(-1)[i])
+        G.add_node(i, value=matrix[row, col], pos=(col, -row))
     
-    # Add edges
-    edges = edge_index.T.numpy()
-    for edge in edges:
-        G.add_edge(edge[0], edge[1])
+    edge_list = edge_index.T.tolist()
+    G.add_edges_from(edge_list)
     
-    # Draw the graph
-    fig, ax = plt.subplots(figsize=(8, 8))
+    plt.figure(figsize=(12, 8))
     pos = nx.get_node_attributes(G, 'pos')
-    values = [G.nodes[i]['value'] for i in G.nodes()]
     
-    nodes = nx.draw_networkx_nodes(G, pos, node_color=values, node_size=500, 
-                                 cmap=plt.cm.viridis, ax=ax)
-    nx.draw_networkx_edges(G, pos, ax=ax)
-    nx.draw_networkx_labels(G, pos, font_size=8, font_color='white', ax=ax)
+    if attention_weights is not None:
+        edge_colors = attention_weights.detach().cpu().numpy()
+        nx.draw_networkx_edges(G, pos, edge_color=edge_colors, 
+                             edge_cmap=plt.cm.viridis, width=2)
+    else:
+        nx.draw_networkx_edges(G, pos, edge_color='gray', width=1)
+    
+    node_colors = [G.nodes[i]['value'] for i in G.nodes()]
+    nodes = nx.draw_networkx_nodes(G, pos, node_color=node_colors, 
+                                 node_size=500, cmap=plt.cm.viridis)
     
     plt.colorbar(nodes)
-    ax.set_title("4x4 Matrix as Graph")
+    
+    labels = {i: f'{matrix[i//4, i%4]:.2f}' for i in G.nodes()}
+    nx.draw_networkx_labels(G, pos, labels)
+    
+    plt.title('4x4 Matrix as Graph with Attention Weights')
+    plt.axis('equal')
     plt.show()
 
 def train_gnn():
-    # Set random seed for reproducibility
     torch.manual_seed(42)
     np.random.seed(42)
 
-    # Generate training data
     num_train_samples = 100
     matrices, labels = generate_data(num_train_samples)
 
-    # Convert matrices to graph data objects
     train_data = []
     for i in range(num_train_samples):
         x, edge_index = matrix_to_graph(matrices[i])
@@ -123,12 +119,10 @@ def train_gnn():
                    y=torch.LongTensor([labels[i]]))
         train_data.append(data)
 
-    # Create and train the model
     model = GNN4x4()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     criterion = nn.NLLLoss()
 
-    # Training loop
     num_epochs = 50
     train_losses = []
     train_accs = []
@@ -160,13 +154,11 @@ def train_gnn():
             print(f'Loss: {avg_loss:.4f}')
             print(f'Accuracy: {accuracy:.4f}')
 
-        # Visualize a sample graph every 10 epochs
         if epoch % 10 == 0:
             sample_matrix = matrices[0]
             x, edge_index = matrix_to_graph(sample_matrix)
-            visualize_graph(sample_matrix, edge_index)
+            visualize_graph(sample_matrix, edge_index, model.attention_weights)
 
-    # Plot training progress
     plt.figure(figsize=(12, 4))
     
     plt.subplot(1, 2, 1)
@@ -185,6 +177,5 @@ def train_gnn():
     plt.show()
 
 if __name__ == "__main__":
-    # Example usage
     print("Training GNN on 4x4 matrices...")
     train_gnn()

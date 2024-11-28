@@ -3,11 +3,59 @@ let trainLosses = [];
 let trainAccs = [];
 let valLosses = [];
 let valAccs = [];
+let attentionWeights = [];
 
 // Global variables for visualization state
 let showEdges = true;
 let showValues = true;
 let cy; // Cytoscape instance
+
+// Style for the graph visualization
+const graphStyle = [
+    {
+        selector: 'node',
+        style: {
+            'background-color': 'data(color)',
+            'label': 'data(label)',
+            'width': 50,
+            'height': 50,
+            'text-valign': 'center',
+            'text-halign': 'center',
+            'font-size': '12px',
+            'color': '#fff',
+            'text-outline-width': 1,
+            'text-outline-color': '#000'
+        }
+    },
+    {
+        selector: 'edge',
+        style: {
+            'width': 'data(weight)',
+            'line-color': 'data(color)',
+            'target-arrow-color': 'data(color)',
+            'curve-style': 'bezier',
+            'opacity': 0.7
+        }
+    },
+    {
+        selector: '.highlighted',
+        style: {
+            'background-color': '#ff0',
+            'line-color': '#ff0',
+            'transition-property': 'background-color, line-color',
+            'transition-duration': '0.5s'
+        }
+    },
+    {
+        selector: '.message',
+        style: {
+            'width': 20,
+            'height': 20,
+            'background-color': '#ff0',
+            'opacity': 0.8
+        }
+    }
+];
 
 // Helper function to generate random 4x4 matrices
 function generateData(numSamples) {
@@ -36,7 +84,7 @@ function generateData(numSamples) {
     }
 }
 
-// Convert matrix to graph structure
+// Convert matrix to graph data for Cytoscape
 function matrixToGraph(matrix) {
     const nodes = [];
     const edges = [];
@@ -44,60 +92,119 @@ function matrixToGraph(matrix) {
     // Create nodes
     for (let i = 0; i < 4; i++) {
         for (let j = 0; j < 4; j++) {
-            const nodeId = `n${i}-${j}`;
+            const value = matrix[i][j];
+            const color = valueToColor(value);
             nodes.push({
                 data: {
-                    id: nodeId,
-                    value: matrix[i][j],
-                    label: `(${i},${j}): ${matrix[i][j].toFixed(2)}`
+                    id: `${i}-${j}`,
+                    label: value.toFixed(2),
+                    color: color,
+                    value: value,
+                    row: i,
+                    col: j
+                },
+                position: {
+                    x: j * 100 + 100,
+                    y: i * 100 + 100
                 }
             });
-            
-            // Create edges to adjacent nodes
-            if (i > 0) edges.push({ data: { source: nodeId, target: `n${i-1}-${j}` } });
-            if (j > 0) edges.push({ data: { source: nodeId, target: `n${i}-${j-1}` } });
+        }
+    }
+    
+    // Create edges between adjacent cells
+    for (let i = 0; i < 4; i++) {
+        for (let j = 0; j < 4; j++) {
+            const directions = [[-1,-1], [-1,0], [-1,1], [0,-1], [0,1], [1,-1], [1,0], [1,1]];
+            for (const [di, dj] of directions) {
+                const ni = i + di;
+                const nj = j + dj;
+                if (ni >= 0 && ni < 4 && nj >= 0 && nj < 4) {
+                    edges.push({
+                        data: {
+                            id: `${i}-${j}_${ni}-${nj}`,
+                            source: `${i}-${j}`,
+                            target: `${ni}-${nj}`,
+                            weight: 2,
+                            color: '#ccc'
+                        }
+                    });
+                }
+            }
         }
     }
     
     return { nodes, edges };
 }
 
+// Convert value to color using a color scale
+function valueToColor(value) {
+    const scale = d3.scaleSequential(d3.interpolateViridis)
+        .domain([0, 1]);
+    return scale(value);
+}
+
 // Initialize Cytoscape graph
-function initializeGraph(matrix) {
+function initGraph(matrix) {
+    const container = document.getElementById('graph-container');
     const graphData = matrixToGraph(matrix);
     
     cy = cytoscape({
-        container: document.getElementById('graph-container'),
+        container: container,
         elements: {
             nodes: graphData.nodes,
             edges: graphData.edges
         },
-        style: [
-            {
-                selector: 'node',
-                style: {
-                    'background-color': 'data(value)',
-                    'label': showValues ? 'data(label)' : '',
-                    'color': '#fff',
-                    'text-outline-color': '#000',
-                    'text-outline-width': 2,
-                    'font-size': '12px'
-                }
-            },
-            {
-                selector: 'edge',
-                style: {
-                    'width': 2,
-                    'line-color': '#666',
-                    'curve-style': 'bezier'
-                }
-            }
-        ],
+        style: graphStyle,
         layout: {
-            name: 'grid',
-            rows: 4,
-            cols: 4
+            name: 'preset'
+        },
+        userZoomingEnabled: true,
+        userPanningEnabled: true,
+        boxSelectionEnabled: false
+    });
+    
+    return cy;
+}
+
+// Animate message passing between nodes
+function animateMessagePassing() {
+    const nodes = cy.nodes().toArray();
+    let currentIndex = 0;
+    
+    function highlightNextNode() {
+        if (currentIndex > 0) {
+            nodes[currentIndex - 1].removeClass('highlighted');
+            nodes[currentIndex - 1].connectedEdges().removeClass('highlighted');
         }
+        
+        if (currentIndex < nodes.length) {
+            const currentNode = nodes[currentIndex];
+            currentNode.addClass('highlighted');
+            currentNode.connectedEdges().addClass('highlighted');
+            
+            currentIndex++;
+            setTimeout(highlightNextNode, 500);
+        } else {
+            // Reset for next animation
+            nodes[nodes.length - 1].removeClass('highlighted');
+            nodes[nodes.length - 1].connectedEdges().removeClass('highlighted');
+            currentIndex = 0;
+        }
+    }
+    
+    highlightNextNode();
+}
+
+// Update edge weights based on attention weights
+function updateAttentionWeights(weights) {
+    const maxWeight = Math.max(...weights);
+    const scale = d3.scaleSequential(d3.interpolateReds)
+        .domain([0, maxWeight]);
+    
+    cy.edges().forEach((edge, i) => {
+        const weight = weights[i];
+        edge.data('weight', weight * 5);
+        edge.data('color', scale(weight));
     });
 }
 
@@ -241,7 +348,7 @@ function toggleValues() {
     cy.nodes().style('label', node => {
         if (!showValues) return '';
         const id = node.id();
-        const i = parseInt(id.split('-')[0].substring(1));
+        const i = parseInt(id.split('-')[0]);
         const j = parseInt(id.split('-')[1]);
         return `(${i},${j}): ${node.data('value').toFixed(2)}`;
     });
@@ -254,10 +361,10 @@ async function trainModel() {
         status.textContent = 'Generating training data...';
         
         // Generate training data
-        const [matrices, labels] = generateData(100);
+        const [matrices, labels] = generateData(50); // Reduced from 100 to 50
         
         // Initialize graph with first matrix
-        initializeGraph(matrices[0]);
+        initGraph(matrices[0]);
         
         status.textContent = 'Creating model...';
         const model = createModel();
@@ -271,21 +378,22 @@ async function trainModel() {
         const xTrain = tf.tensor2d(matrices.map(m => m.flat()));
         const yTrain = tf.oneHot(tf.tensor1d(labels, 'int32'), 2);
         
-        // Train the model
+        // Train the model with reduced epochs and update frequency
         await model.fit(xTrain, yTrain, {
-            epochs: 50,
-            batchSize: 32,
+            epochs: 20, // Reduced from 50 to 20
+            batchSize: 16, // Reduced from 32 to 16
             shuffle: true,
             callbacks: {
                 onEpochEnd: async (epoch, logs) => {
                     trainLosses.push(logs.loss);
                     trainAccs.push(logs.acc);
                     
-                    status.textContent = `Training... Epoch ${epoch + 1}/50`;
-                    plotTrainingProgress();
+                    status.textContent = `Training... Epoch ${epoch + 1}/20`;
                     
-                    // Update visualizations every few epochs
-                    if (epoch % 5 === 0) {
+                    // Update visualizations less frequently
+                    if (epoch % 10 === 0) { // Changed from 5 to 10
+                        plotTrainingProgress();
+                        
                         // Get embeddings for current matrix
                         const currentMatrix = matrices[0];
                         const embeddings = await tf.tidy(() => {
@@ -296,6 +404,9 @@ async function trainModel() {
                         // Update visualizations
                         updateGraphVisualization(currentMatrix, embeddings);
                         plotEmbeddings(embeddings.map((e, i) => [e, embeddings[(i + 1) % embeddings.length]]));
+                        
+                        // Add delay between updates to avoid rate limiting
+                        await new Promise(resolve => setTimeout(resolve, 1000));
                     }
                     
                     await tf.nextFrame();
